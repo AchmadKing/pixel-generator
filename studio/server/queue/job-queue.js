@@ -28,12 +28,14 @@ export {
 };
 
 export class JobQueue {
-  constructor(db, handlersOrOptions = {}, storageManager = null) {
+  constructor(db, handlersOrOptions = {}, storageManager = null, assetCoordinator = null) {
     this.db = db;
     this.store = new JobStore(db);
     this.storageManager = storageManager || new StorageManager();
+    this.assetCoordinator = assetCoordinator;
     this.queue = [];
     this.isProcessing = false;
+    this.isDraining = false;
     this.concurrency = 1; // Strict FIFO local execution
     this.providers = new Map();
     this.handlers = {};
@@ -63,6 +65,12 @@ export class JobQueue {
   }
 
   async enqueue({ assetId = null, providerId = 'mock', requestPayload = {} }) {
+    if (assetId && this.assetCoordinator?.isDeleting(assetId)) {
+      const err = new Error(`Cannot enqueue job: Asset ${assetId} is currently being deleted.`);
+      err.code = 'ERR_ASSET_BUSY';
+      err.statusCode = 409;
+      throw err;
+    }
     const job = this.store.createJob({ assetId, providerId, requestPayload });
     this.queue.push(job.id);
     this.processNext();
@@ -106,6 +114,10 @@ export class JobQueue {
   }
 
   async processNext() {
+    if (this.isDraining) {
+      this.isProcessing = false;
+      return;
+    }
     if (this.isProcessing || this.queue.length === 0) return;
     this.isProcessing = true;
 
@@ -119,6 +131,16 @@ export class JobQueue {
 
     let currentAssetId = job.asset_id;
     let currentVersionId = null;
+
+    if (currentAssetId && this.assetCoordinator) {
+      try {
+        this.assetCoordinator.acquireJobLock(currentAssetId, jobId);
+      } catch (lockErr) {
+        this.store.failJob(jobId, lockErr.message);
+        this.isProcessing = false;
+        return this.processNext();
+      }
+    }
 
     try {
       // 1. Check for custom function handler (e.g. from existing unit/integration tests)
@@ -179,13 +201,20 @@ export class JobQueue {
       if (!currentAssetId) {
         currentAssetId = `ast_${crypto.randomUUID().slice(0, 8)}`;
         const payload = job.request_payload || {};
+        const projectId = payload.projectId || 'proj_default';
         const assetName = payload.name || payload.prompt?.slice(0, 30) || 'Generated Asset';
         const category = payload.category || 'items';
 
         this.db.prepare(`
           INSERT INTO assets (id, project_id, name, category, current_version_id)
-          VALUES (?, 'proj_default', ?, ?, NULL)
-        `).run(currentAssetId, assetName, category);
+          VALUES (?, ?, ?, ?, NULL)
+        `).run(currentAssetId, projectId, assetName, category);
+
+        if (this.assetCoordinator) {
+          try {
+            this.assetCoordinator.acquireJobLock(currentAssetId, jobId);
+          } catch (_) {}
+        }
       }
 
       // 6. Post-Processing Pipeline Execution
@@ -322,9 +351,29 @@ export class JobQueue {
         }
       }
     } finally {
+      if (currentAssetId && this.assetCoordinator) {
+        this.assetCoordinator.releaseJobLock(currentAssetId, jobId);
+      }
       this.isProcessing = false;
       this.processNext();
     }
+  }
+
+  drain() {
+    this.isDraining = true;
+  }
+
+  isIdle() {
+    return !this.isProcessing && this.queue.length === 0;
+  }
+
+  async waitForIdle(timeoutMs = 5000) {
+    const start = Date.now();
+    while (!this.isIdle()) {
+      if (Date.now() - start > timeoutMs) return false;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    return true;
   }
 
   getJob(jobId) {

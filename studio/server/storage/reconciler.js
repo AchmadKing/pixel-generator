@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
+import { AssetDeletionOrchestrator } from './asset-deletion-orchestrator.js';
 
 const STALE_STAGING_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 /**
  * Reconciles the filesystem with the SQLite database upon server startup.
+ * 0. Recovers incomplete asset deletions from the deletion journal.
  * 1. Prunes only stale staging files (>15m). Preserves active staging files.
  * 2. Scans generated folder, excluding hidden directories (.staging, .quarantine).
  *    Moves orphan version folders to .quarantine/ and logs audit warning.
@@ -16,8 +18,13 @@ export function reconcileStorageAndDatabase(db, storageConfig = config.storage) 
   const auditReport = {
     staleStagingPruned: 0,
     orphansQuarantined: [],
-    missingBackingFiles: []
+    missingBackingFiles: [],
+    incompleteDeletionsRecovered: 0
   };
+
+  // 0. Incomplete Asset Deletions Recovery
+  const deletionReport = AssetDeletionOrchestrator.recoverIncompleteDeletions(db, storageConfig);
+  auditReport.incompleteDeletionsRecovered = deletionReport.purged + deletionReport.quarantined;
 
   // 1. Staging Cleanup (Stale only)
   if (fs.existsSync(storageConfig.stagingDir)) {

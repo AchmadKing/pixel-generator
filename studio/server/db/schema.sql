@@ -125,3 +125,13 @@ BEGIN
     THEN RAISE(ABORT, 'Integrity error: Cannot delete the currently active version directly. Unlink current_version_id or use safe asset deletion.')
   END;
 END;
+
+-- 6. Asset Deletion Journal (Failure-Safe Crash Recovery)
+CREATE TABLE IF NOT EXISTS asset_deletion_journal (
+  asset_id TEXT PRIMARY KEY,
+  stage TEXT NOT NULL CHECK(stage IN ('pending', 'db_deleted', 'fs_cleaned', 'quarantined', 'failed')),
+  target_dir TEXT NOT NULL,
+  error_message TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
