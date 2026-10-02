@@ -1,0 +1,30 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 5178
+  },
+  "storage": {
+    "baseDir": "assets",
+    "projectsDir": "assets/projects",
+    "generatedDir": "assets/generated",
+    "exportsDir": "assets/exports",
+    "referencesDir": "assets/references",
+    "dbPath": "assets/studio.db"
+  },
+  "providers": {
+    "default": "mock",
+    "fal": {
+      "endpoint": "https://queue.fal.run/fal-ai/flux-lora",
+      "model": "flux-lora",
+      "requestTimeoutMs": 15000,
+      "totalJobTimeoutMs": 120000,
+      "pollIntervalMs": 1000
+    }
+  },
+  "defaults": {
+    "palette": "endesga-32",
+    "targetWidth": 32,
+    "targetHeight": 32,
+    "frameDurationMs": 125
+  }
+}
