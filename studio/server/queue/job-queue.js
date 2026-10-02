@@ -8,6 +8,7 @@ import { MockProvider } from '../providers/mock-provider.js';
 import { FalProvider } from '../providers/fal-provider.js';
 import { config } from '../config.js';
 import { processImage } from '../post-processing/post-processor.js';
+import { cleanupEmptyDraftAssets } from '../db/safe-deletion.js';
 import {
   canonicalizeJson,
   canonicalStringify,
@@ -198,21 +199,12 @@ export class JobQueue {
         processedBuffer = result.imageBuffer;
         finalConfigJson = JSON.stringify(result.metadata || {});
       } else {
-        try {
-          const postResult = processImage(result.imageBuffer, procOptions);
-          processedBuffer = postResult.processedBuffer;
-          finalConfigJson = JSON.stringify({
-            ...(result.metadata || {}),
-            ...postResult.metadata
-          });
-        } catch (procErr) {
-          console.warn(`[WARN] Post-processing skipped due to processing error: ${procErr.message}`);
-          processedBuffer = result.imageBuffer;
-          finalConfigJson = JSON.stringify({
-            ...(result.metadata || {}),
-            postProcessingError: procErr.message
-          });
-        }
+        const postResult = processImage(result.imageBuffer, procOptions);
+        processedBuffer = postResult.processedBuffer;
+        finalConfigJson = JSON.stringify({
+          ...(result.metadata || {}),
+          ...postResult.metadata
+        });
       }
 
       // 7. Save raw and processed images to staging
@@ -285,6 +277,15 @@ export class JobQueue {
         this.storageManager.compensatingCleanup(jobId, null, null);
       }
 
+      // Surgically prune empty draft asset if this job created it and it has zero versions
+      if (!job.asset_id && currentAssetId) {
+        try {
+          cleanupEmptyDraftAssets(this.db, currentAssetId);
+        } catch (cleanupErr) {
+          console.warn(`[WARN] Failed to cleanup empty draft asset ${currentAssetId}: ${cleanupErr.message}`);
+        }
+      }
+
       // Check if this error represents an ambiguous submit
       if (error.isAmbiguous) {
         try {
@@ -297,6 +298,7 @@ export class JobQueue {
           // If SQLite is locked / unwritable, persist emergency recovery record
           const recoveryDir = this.storageManager.config.recoveryDir || path.resolve(this.storageManager.config.baseDir, 'generated/.recovery');
           persistEmergencyRecoveryRecord(recoveryDir, jobId, {
+            job_id: jobId,
             error: error.message,
             dbError: dbErr.message,
             assetId: currentAssetId,
@@ -310,6 +312,7 @@ export class JobQueue {
         } catch (dbErr) {
           const recoveryDir = this.storageManager.config.recoveryDir || path.resolve(this.storageManager.config.baseDir, 'generated/.recovery');
           persistEmergencyRecoveryRecord(recoveryDir, jobId, {
+            job_id: jobId,
             error: error.message,
             dbError: dbErr.message,
             assetId: currentAssetId,

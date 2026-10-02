@@ -7,7 +7,7 @@
  * It is NEVER executed automatically by `npm test` or CI pipelines.
  * 
  * Usage:
- *   node scripts/test-fal-manual.js [--confirm]
+ *   node scripts/manual-fal-harness.js [--confirm]
  */
 
 import { config } from '../studio/server/config.js';
@@ -34,7 +34,7 @@ async function runManualTest() {
   if (!hasConfirmFlag) {
     console.log('\n[SAFETY BLOCK] Live generation aborted.');
     console.log('To confirm that you want to execute a real paid request, run:');
-    console.log('  node scripts/test-fal-manual.js --confirm\n');
+    console.log('  node scripts/manual-fal-harness.js --confirm\n');
     process.exit(0);
   }
 

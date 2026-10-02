@@ -194,10 +194,27 @@ export function persistEmergencyRecoveryRecord(recoveryDir, jobId, payload) {
     throw new Error(`SecurityError: Invalid jobId format: ${jobId}`);
   }
 
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new TypeError(`RecoveryPayloadError: payload must be a non-null object for jobId: ${jobId}`);
+  }
+
+  // Strict job_id validation and anti-corruption resolution:
+  // If payload.job_id is set and differs from jobId, explicitly reject with RecoveryConflictError!
+  if (payload.job_id !== undefined && payload.job_id !== null && payload.job_id !== jobId) {
+    const conflictErr = new Error(`RecoveryConflictError: Payload job_id "${payload.job_id}" conflicts with caller jobId "${jobId}"`);
+    conflictErr.code = 'ERR_RECOVERY_JOB_ID_CONFLICT';
+    conflictErr.expectedJobId = jobId;
+    conflictErr.payloadJobId = payload.job_id;
+    throw conflictErr;
+  }
+
+  // Safe normalization: ensure payload.job_id is strictly consistent with jobId
+  const normalizedPayload = { ...payload, job_id: jobId };
+
   fs.mkdirSync(recoveryDir, { recursive: true });
   const attemptedDestinations = [];
 
-  const canonicalPayloadString = canonicalStringify(payload);
+  const canonicalPayloadString = canonicalStringify(normalizedPayload);
   const payloadSha256 = crypto.createHash('sha256').update(Buffer.from(canonicalPayloadString, 'utf8')).digest('hex');
 
   const envelope = {
@@ -206,7 +223,7 @@ export function persistEmergencyRecoveryRecord(recoveryDir, jobId, payload) {
       algorithm: 'sha256',
       payload_sha256: payloadSha256
     },
-    payload: canonicalizeJson(payload)
+    payload: canonicalizeJson(normalizedPayload)
   };
   const envelopeBuffer = Buffer.from(JSON.stringify(envelope, null, 2), 'utf8');
 

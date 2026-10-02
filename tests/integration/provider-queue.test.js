@@ -7,6 +7,7 @@ import { initDatabase } from '../../studio/server/db/database.js';
 import { StorageManager } from '../../studio/server/storage/storage-manager.js';
 import { JobQueue } from '../../studio/server/queue/job-queue.js';
 import { JobStore } from '../../studio/server/queue/job-store.js';
+import { encodePng } from '../../studio/server/providers/png-builder.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -170,7 +171,7 @@ test('Provider Queue & Storage Integration Suite', async (t) => {
     const mockProvider = {
       name: 'Failing Provider',
       generate: async () => ({
-        imageBuffer: Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89, 0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]),
+        imageBuffer: encodePng(1, 1, Buffer.from([255, 0, 0, 255])),
         mimeType: 'image/png',
         width: 1,
         height: 1,
@@ -237,5 +238,92 @@ test('Provider Queue & Storage Integration Suite', async (t) => {
       // If folder exists, it should not have any new version folders left behind
       assert.equal(files.filter(f => f.startsWith('ver_')).length, 0, 'No orphaned version directory must remain');
     }
+  });
+
+  await t.test('Pipeline Failure: Corrupted PNG buffer from provider aborts job before database commit and cleans staging', async () => {
+    // Provider outputs a corrupted PNG (magic bytes only, missing chunks)
+    const corruptedProvider = {
+      name: 'Corrupted Provider',
+      generate: async () => ({
+        imageBuffer: Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00]),
+        mimeType: 'image/png',
+        width: 1,
+        height: 1,
+        seed: 2
+      })
+    };
+
+    const queue = new JobQueue(db, { 'mock': corruptedProvider }, storageManager);
+    const job = await queue.enqueue({
+      providerId: 'mock',
+      requestPayload: { prompt: 'corrupt image test' }
+    });
+
+    let attempts = 0;
+    let failedJob = queue.getJob(job.id);
+    while (failedJob.status !== 'failed' && attempts < 20) {
+      await new Promise(r => setTimeout(r, 25));
+      failedJob = queue.getJob(job.id);
+      attempts++;
+    }
+
+    assert.equal(failedJob.status, 'failed');
+    assert.ok(failedJob.error_message.length > 0);
+
+    // Verify staging files were surgically cleaned up
+    const stagedRaw = path.join(storageManager.config.stagingDir, `${job.id}_raw.png`);
+    const stagedProcessed = path.join(storageManager.config.stagingDir, `${job.id}_processed.png`);
+    assert.equal(fs.existsSync(stagedRaw), false, 'Raw staging file must not remain on failure');
+    assert.equal(fs.existsSync(stagedProcessed), false, 'Processed staging file must not remain on failure');
+
+    // Verify no version was committed
+    const versions = db.prepare('SELECT * FROM asset_versions').all();
+    assert.equal(versions.length, 0, 'Zero asset versions must be created on pipeline failure');
+  });
+
+  await t.test('Pipeline Skip Mode: Explicit skipPostProcessing: true bypasses processImage safely', async () => {
+    const validProvider = {
+      name: 'Valid Provider',
+      generate: async () => ({
+        imageBuffer: encodePng(2, 2, Buffer.from([
+          255, 0, 0, 255,   0, 255, 0, 255,
+          0, 0, 255, 255,   255, 255, 0, 255
+        ])),
+        mimeType: 'image/png',
+        width: 2,
+        height: 2,
+        seed: 3,
+        metadata: { rawInfo: 'untouched' }
+      })
+    };
+
+    const queue = new JobQueue(db, { 'mock': validProvider }, storageManager);
+    const job = await queue.enqueue({
+      providerId: 'mock',
+      requestPayload: {
+        prompt: 'skip post-processing test',
+        skipPostProcessing: true
+      }
+    });
+
+    let attempts = 0;
+    let completedJob = queue.getJob(job.id);
+    while (completedJob.status !== 'completed' && attempts < 20) {
+      await new Promise(r => setTimeout(r, 25));
+      completedJob = queue.getJob(job.id);
+      attempts++;
+    }
+
+    assert.equal(completedJob.status, 'completed');
+    assert.ok(completedJob.created_version_id);
+
+    const version = db.prepare('SELECT * FROM asset_versions WHERE id = ?').get(completedJob.created_version_id);
+    assert.ok(version);
+    assert.equal(version.integrity_status, 'ok');
+
+    // Both files exist and raw buffer equals processed buffer
+    const rawBuf = fs.readFileSync(version.raw_file_path);
+    const procBuf = fs.readFileSync(version.processed_file_path);
+    assert.ok(rawBuf.equals(procBuf), 'Processed file must match raw file when post-processing is explicitly skipped');
   });
 });

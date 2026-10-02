@@ -12,7 +12,8 @@
     "dev": "node studio/cli/studio.js dev",
     "test": "node --test \"tests/**/*.test.js\"",
     "test:unit": "node --test \"tests/unit/**/*.test.js\"",
-    "test:integration": "node --test \"tests/integration/**/*.test.js\""
+    "test:integration": "node --test \"tests/integration/**/*.test.js\"",
+    "test:manual:fal": "node scripts/manual-fal-harness.js"
   },
   "keywords": [
     "pixel-art",

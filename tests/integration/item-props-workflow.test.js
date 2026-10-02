@@ -42,6 +42,27 @@ function safeCleanupDir(dir) {
   }
 }
 
+/**
+ * Executes a callback with scoped monkey-patching on node:fs methods.
+ * Guarantees 100% restoration of original methods in finally block.
+ */
+async function withInjectedFs(overrides, fn) {
+  const originalFns = {};
+  for (const method of Object.keys(overrides)) {
+    originalFns[method] = fs[method];
+  }
+  try {
+    for (const [method, handler] of Object.entries(overrides)) {
+      fs[method] = (...args) => handler(originalFns[method], ...args);
+    }
+    return await fn();
+  } finally {
+    for (const [method, orig] of Object.entries(originalFns)) {
+      fs[method] = orig;
+    }
+  }
+}
+
 test('Item Props Non-Destructive Workflow & 36 Failure-Injection Durability Suite', async (suite) => {
   let db;
   let storageManager;
@@ -189,17 +210,57 @@ test('Item Props Non-Destructive Workflow & 36 Failure-Injection Durability Suit
   });
 
   await suite.test('Uji 5: closeSync failure on temporary file: preserved as temp_preserved when payload is valid', async () => {
-    // If temp descriptor close fails but buffer was fsynced, persistEmergencyRecoveryRecord returns temp_preserved
+    let injectedCount = 0;
     const payload = { job_id: 'job_close_temp', test: true };
-    const res = persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_close_temp', payload);
-    assert.ok(res.status === 'committed' || res.status === 'temp_preserved');
+
+    const res = await withInjectedFs({
+      closeSync: (origClose, fd) => {
+        origClose(fd);
+        if (injectedCount === 0) {
+          injectedCount++;
+          const err = new Error('EIO: injected temp closeSync failure');
+          err.code = 'EIO';
+          throw err;
+        }
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_close_temp', payload);
+    });
+
+    assert.equal(injectedCount, 1, 'Injected closeSync failure must have been triggered');
+    assert.equal(res.status, 'temp_preserved', 'Must return temp_preserved when closeSync fails but payload is valid');
+    assert.equal(res.verified, true);
+    assert.ok(fs.existsSync(res.path), 'Preserved temporary file must remain on disk');
+    assert.ok(res.closeError.includes('EIO'));
   });
 
   await suite.test('Uji 6: Delayed unlinking: source temp retained until destination verified', async () => {
+    let unlinkedSource = false;
+    let destinationExistedAtUnlink = false;
+    let destinationValidAtUnlink = false;
     const payload = { job_id: 'job_delay_unlink', test: true };
-    const res = persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_delay_unlink', payload);
-    assert.ok(res.verified);
-    assert.ok(fs.existsSync(res.path));
+
+    const res = await withInjectedFs({
+      unlinkSync: (origUnlink, filePath) => {
+        if (typeof filePath === 'string' && filePath.includes('.tmp.')) {
+          unlinkedSource = true;
+          const dstPath = path.join(TEST_RECOVERY_DIR, 'job_delay_unlink.json');
+          destinationExistedAtUnlink = fs.existsSync(dstPath);
+          if (destinationExistedAtUnlink) {
+            const check = verifyFilePayload(dstPath, 'job_delay_unlink');
+            destinationValidAtUnlink = (check.status === 'valid');
+          }
+        }
+        return origUnlink(filePath);
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_delay_unlink', payload);
+    });
+
+    assert.equal(res.status, 'committed');
+    assert.equal(unlinkedSource, true, 'Temporary source must be unlinked after destination confirmed');
+    assert.equal(destinationExistedAtUnlink, true, 'Destination must exist before source is unlinked');
+    assert.equal(destinationValidAtUnlink, true, 'Destination must be verified valid before source is unlinked');
   });
 
   await suite.test('Uji 7: Fluctuating file status: inaccessible status does not throw premature data loss', async () => {
@@ -259,28 +320,113 @@ test('Item Props Non-Destructive Workflow & 36 Failure-Injection Durability Suit
   });
 
   await suite.test('L2: closeSync fails on lock, unlinkSync still attempted and succeeds', async () => {
-    fs.mkdirSync(TEST_RECOVERY_DIR, { recursive: true });
+    let lockFd = null;
+    let lockCloseInjected = false;
+    let unlinkedLock = false;
+    const payload = { job_id: 'job_l2', test: 'l2' };
     const lockPath = path.join(TEST_RECOVERY_DIR, 'job_l2.primary.lock');
-    const fd = fs.openSync(lockPath, 'wx');
-    fs.closeSync(fd);
-    // Double close throws
-    assert.throws(() => fs.closeSync(fd));
-    // Unlink still succeeds
-    fs.unlinkSync(lockPath);
-    assert.equal(fs.existsSync(lockPath), false);
+
+    const res = await withInjectedFs({
+      openSync: (origOpen, p, flags, mode) => {
+        const fd = origOpen(p, flags, mode);
+        if (typeof p === 'string' && p.endsWith('.primary.lock')) {
+          lockFd = fd;
+        }
+        return fd;
+      },
+      closeSync: (origClose, fd) => {
+        origClose(fd);
+        if (lockFd !== null && fd === lockFd) {
+          lockCloseInjected = true;
+          const err = new Error('EBADF: Bad file descriptor on lock close');
+          err.code = 'EBADF';
+          throw err;
+        }
+      },
+      unlinkSync: (origUnlink, targetPath) => {
+        if (typeof targetPath === 'string' && targetPath.includes('.primary.lock')) {
+          unlinkedLock = true;
+        }
+        return origUnlink(targetPath);
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_l2', payload);
+    });
+
+    assert.equal(lockCloseInjected, true, 'Close failure on lock fd must have been injected');
+    assert.equal(res.status, 'committed', 'Record must commit successfully despite lock close failure');
+    assert.equal(unlinkedLock, true, 'unlinkSync on lock must have executed despite closeSync throwing');
+    assert.equal(fs.existsSync(lockPath), false, 'Lock file must be unlinked');
   });
 
   await suite.test('L3: closeSync succeeds on lock, unlinkSync fails: lock file left on disk; record committed', async () => {
+    let unlinkInjected = 0;
     const payload = { job_id: 'job_l3', data: 'safe' };
-    const res = persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_l3', payload);
-    assert.equal(res.status, 'committed');
-    assert.ok(res.verified);
+    const lockPath = path.join(TEST_RECOVERY_DIR, 'job_l3.primary.lock');
+
+    const res = await withInjectedFs({
+      unlinkSync: (origUnlink, targetPath) => {
+        if (typeof targetPath === 'string' && targetPath.includes('.primary.lock')) {
+          unlinkInjected++;
+          const err = new Error('EPERM: operation not permitted on lock unlink');
+          err.code = 'EPERM';
+          throw err;
+        }
+        return origUnlink(targetPath);
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_l3', payload);
+    });
+
+    assert.equal(unlinkInjected, 1, 'Injected unlinkSync failure must be triggered on lock');
+    assert.equal(res.status, 'committed', 'Record must still be committed');
+    assert.equal(res.verified, true);
+    assert.equal(fs.existsSync(lockPath), true, 'Lock file must remain on disk when unlinking fails');
   });
 
   await suite.test('L4: Compound failure: both close and unlink error isolated without failing commit', async () => {
+    let lockFd = null;
+    let lockCloseInjected = false;
+    let unlinkInjected = 0;
     const payload = { job_id: 'job_l4', data: 'safe_l4' };
-    const res = persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_l4', payload);
-    assert.ok(res.verified);
+    const lockPath = path.join(TEST_RECOVERY_DIR, 'job_l4.primary.lock');
+
+    const res = await withInjectedFs({
+      openSync: (origOpen, p, flags, mode) => {
+        const fd = origOpen(p, flags, mode);
+        if (typeof p === 'string' && p.endsWith('.primary.lock')) {
+          lockFd = fd;
+        }
+        return fd;
+      },
+      closeSync: (origClose, fd) => {
+        origClose(fd);
+        if (lockFd !== null && fd === lockFd) {
+          lockCloseInjected = true;
+          const err = new Error('EIO on lock close');
+          err.code = 'EIO';
+          throw err;
+        }
+      },
+      unlinkSync: (origUnlink, targetPath) => {
+        if (typeof targetPath === 'string' && targetPath.includes('.primary.lock')) {
+          unlinkInjected++;
+          const err = new Error('EBUSY: resource busy on lock unlink');
+          err.code = 'EBUSY';
+          throw err;
+        }
+        return origUnlink(targetPath);
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_l4', payload);
+    });
+
+    assert.equal(lockCloseInjected, true, 'Lock close failure must have been injected');
+    assert.equal(unlinkInjected, 1, 'Lock unlink failure must have been injected');
+    assert.equal(res.status, 'committed');
+    assert.equal(res.verified, true);
+    assert.equal(fs.existsSync(res.path), true);
+    assert.equal(fs.existsSync(lockPath), true);
   });
 
   await suite.test('L5: Foreign lock file (primaryLockCreated = false): foreign lock never deleted', async () => {
@@ -352,10 +498,31 @@ test('Item Props Non-Destructive Workflow & 36 Failure-Injection Durability Suit
   });
 
   await suite.test('P2: Inaccessible destination: destination is NOT deleted; source preserved', async () => {
+    let copyInjected = 0;
+    const primaryDst = path.join(TEST_RECOVERY_DIR, 'job_p2.json');
     fs.mkdirSync(TEST_RECOVERY_DIR, { recursive: true });
+    fs.writeFileSync(primaryDst, 'pre_existing_data_not_to_be_deleted');
+
     const payload = { job_id: 'job_p2', data: 'p2' };
-    const res = persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_p2', payload);
-    assert.ok(res.verified);
+
+    const res = await withInjectedFs({
+      copyFileSync: (origCopy, src, dst, flags) => {
+        if (dst === primaryDst) {
+          copyInjected++;
+          const err = new Error('EACCES: permission denied on primary dst');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return origCopy(src, dst, flags);
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_p2', payload);
+    });
+
+    assert.equal(copyInjected, 1, 'Copy failure must be injected on primary destination');
+    assert.equal(res.verified, true, 'Recovery must succeed via retry candidate');
+    assert.notEqual(res.path, primaryDst, 'Published path must be a collision/retry candidate');
+    assert.equal(fs.readFileSync(primaryDst, 'utf8'), 'pre_existing_data_not_to_be_deleted', 'Foreign file on primary slot must NOT be deleted');
   });
 
   await suite.test('P3: Foreign EEXIST collision: destination already exists with foreign data; never deleted', async () => {
@@ -459,22 +626,96 @@ test('Item Props Non-Destructive Workflow & 36 Failure-Injection Durability Suit
   // =========================================================================
 
   await suite.test('F1: closeSync fails after direct fallback destination fully written & valid: destination NOT deleted', async () => {
-    // Verified via fallback publish logic: destination is evaluated, and if status === 'valid', it is preserved
+    let directFd = null;
+    let exdevTriggered = 0;
+    let directCloseInjected = false;
     const payload = { job_id: 'job_f1', content: 'f1_data' };
-    const res = persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_f1', payload);
-    assert.ok(res.verified);
-    assert.ok(fs.existsSync(res.path));
+
+    const res = await withInjectedFs({
+      copyFileSync: (origCopy, src, dst, flags) => {
+        exdevTriggered++;
+        const err = new Error('EXDEV: cross-device link not permitted');
+        err.code = 'EXDEV';
+        throw err;
+      },
+      openSync: (origOpen, p, flags, mode) => {
+        const fd = origOpen(p, flags, mode);
+        if (typeof p === 'string' && p.endsWith('job_f1.json')) {
+          directFd = fd;
+        }
+        return fd;
+      },
+      closeSync: (origClose, fd) => {
+        origClose(fd);
+        if (directFd !== null && fd === directFd) {
+          directCloseInjected = true;
+          const err = new Error('EIO on direct fallback close');
+          err.code = 'EIO';
+          throw err;
+        }
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_f1', payload);
+    });
+
+    assert.ok(exdevTriggered > 0, 'EXDEV must have triggered direct-write fallback');
+    assert.equal(directCloseInjected, true, 'Close failure on direct destination fd must have occurred');
+    assert.equal(res.verified, true, 'Valid direct destination must be preserved despite close error');
+    assert.ok(fs.existsSync(res.path), 'Destination file must exist and remain valid');
+    const check = verifyFilePayload(res.path, 'job_f1');
+    assert.equal(check.status, 'valid');
   });
 
   await suite.test('F2: closeSync fails and destination is corrupted: deletion only attempted if directCreated === true and source valid', async () => {
-    fs.mkdirSync(TEST_RECOVERY_DIR, { recursive: true });
-    const corruptCandidate = path.join(TEST_RECOVERY_DIR, 'job_f2_candidate.json');
-    fs.writeFileSync(corruptCandidate, 'corrupted_bytes');
+    let directFd = null;
+    let exdevTriggered = false;
+    let destinationDeleted = false;
+    const payload = { job_id: 'job_f2', content: 'f2_data' };
 
-    const check = verifyFilePayload(corruptCandidate);
-    assert.equal(check.status, 'corrupted');
-    // Pre-existing foreign file is not unlinked
-    assert.ok(fs.existsSync(corruptCandidate));
+    const res = await withInjectedFs({
+      copyFileSync: (origCopy, src, dst, flags) => {
+        exdevTriggered = true;
+        const err = new Error('EXDEV');
+        err.code = 'EXDEV';
+        throw err;
+      },
+      openSync: (origOpen, p, flags, mode) => {
+        const fd = origOpen(p, flags, mode);
+        if (typeof p === 'string' && p.endsWith('job_f2.json')) {
+          directFd = fd;
+        }
+        return fd;
+      },
+      writeSync: (origWrite, fd, buffer, offset, length) => {
+        if (directFd !== null && fd === directFd) {
+          const err = new Error('ENOSPC: disk full during direct write');
+          err.code = 'ENOSPC';
+          throw err;
+        }
+        return origWrite(fd, buffer, offset, length);
+      },
+      closeSync: (origClose, fd) => {
+        origClose(fd);
+        if (directFd !== null && fd === directFd) {
+          directFd = null; // Prevent matching recycled descriptor in subsequent readFileSync
+          const err = new Error('EIO during close of corrupted candidate');
+          err.code = 'EIO';
+          throw err;
+        }
+      },
+      unlinkSync: (origUnlink, targetPath) => {
+        if (typeof targetPath === 'string' && targetPath.endsWith('job_f2.json')) {
+          destinationDeleted = true;
+        }
+        return origUnlink(targetPath);
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_f2', payload);
+    });
+
+    assert.equal(exdevTriggered, true);
+    assert.equal(destinationDeleted, true, 'Corrupted direct destination candidate must be cleaned up');
+    assert.equal(res.verified, true, 'Recovery must still succeed via collision retry candidate');
   });
 
   await suite.test('F3: Destination replaced after verification: pre-unlink checks preserve foreign file', async () => {
@@ -532,7 +773,7 @@ test('Item Props Non-Destructive Workflow & 36 Failure-Injection Durability Suit
     fs.mkdirSync(TEST_RECOVERY_DIR, { recursive: true });
     const lockPath = path.join(TEST_RECOVERY_DIR, 'job_f7.primary.lock');
 
-    // Initially stale
+    // Initially stale lock with dead PID
     const oldMeta = {
       lock_version: 1,
       job_id: 'job_f7',
@@ -543,7 +784,6 @@ test('Item Props Non-Destructive Workflow & 36 Failure-Injection Durability Suit
     };
     fs.writeFileSync(lockPath, JSON.stringify(oldMeta));
 
-    // Reconciler evaluates status
     const evalRes = evaluateLockStatus(lockPath);
     assert.equal(evalRes.status, 'stale');
 
@@ -558,45 +798,106 @@ test('Item Props Non-Destructive Workflow & 36 Failure-Injection Durability Suit
     };
     fs.writeFileSync(lockPath, JSON.stringify(newMeta));
 
-    // Pre-unlink identity verification: re-read lock
-    const current = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    if (current.nonce !== evalRes.metadata.nonce) {
-      // Abort deletion!
-    } else {
-      fs.unlinkSync(lockPath);
-    }
+    // Recovery runs; primary slot sees existing lock; does NOT delete foreign lock!
+    const res = persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_f7', { job_id: 'job_f7', val: 'f7' });
 
-    // Lock file must NOT be deleted!
-    assert.ok(fs.existsSync(lockPath));
-    assert.equal(JSON.parse(fs.readFileSync(lockPath, 'utf8')).nonce, 'new_live_nonce');
+    assert.ok(fs.existsSync(lockPath), 'Lock file must NOT be deleted');
+    const currentLock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    assert.equal(currentLock.nonce, 'new_live_nonce', 'New live nonce must be preserved');
+    assert.ok(res.verified);
   });
 
   await suite.test('F8: srcPath replaced before source cleanup: foreign file on srcPath is NOT unlinked', async () => {
-    fs.mkdirSync(TEST_RECOVERY_DIR, { recursive: true });
-    const fakeSrc = path.join(TEST_RECOVERY_DIR, 'job_f8_fake_src.tmp');
-    fs.writeFileSync(fakeSrc, 'foreign_file_contents');
+    let unlinkAttemptedOnForeign = false;
+    const payload = { job_id: 'job_f8', val: 'f8_secret' };
 
-    // Pre-unlink check on srcPath
-    const check = verifyFilePayload(fakeSrc, 'job_f8');
-    assert.notEqual(check.status, 'valid');
+    const res = await withInjectedFs({
+      copyFileSync: (origCopy, src, dst, flags) => {
+        origCopy(src, dst, flags);
+        // Tamper with src right before verification and unlinking!
+        fs.writeFileSync(src, JSON.stringify({ foreign: 'replaced_content' }));
+      },
+      unlinkSync: (origUnlink, targetPath) => {
+        if (typeof targetPath === 'string' && targetPath.includes('.tmp.')) {
+          unlinkAttemptedOnForeign = true;
+        }
+        return origUnlink(targetPath);
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_f8', payload);
+    });
 
-    // If check.status !== 'valid', unlink is aborted
-    assert.ok(fs.existsSync(fakeSrc));
+    assert.equal(res.status, 'committed');
+    assert.equal(res.verified, true);
+    // Pre-unlink source verification detected status !== 'valid', so unlink was aborted!
+    assert.equal(unlinkAttemptedOnForeign, false, 'Pre-unlink check must abort unlinkSync when source was tampered with');
   });
 
   await suite.test('F9: Double failure: closeSync and unlinkSync both fail on lock; recovery record remains committed', async () => {
+    let lockFd = null;
+    let lockCloseInjected = false;
+    let unlinkInjected = 0;
     const payload = { job_id: 'job_f9', important_data: 999 };
-    const res = persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_f9', payload);
-    assert.ok(res.verified);
+
+    const res = await withInjectedFs({
+      openSync: (origOpen, p, flags, mode) => {
+        const fd = origOpen(p, flags, mode);
+        if (typeof p === 'string' && p.endsWith('.primary.lock')) {
+          lockFd = fd;
+        }
+        return fd;
+      },
+      closeSync: (origClose, fd) => {
+        origClose(fd);
+        if (lockFd !== null && fd === lockFd) {
+          lockCloseInjected = true;
+          const err = new Error('EIO on lock close');
+          err.code = 'EIO';
+          throw err;
+        }
+      },
+      unlinkSync: (origUnlink, targetPath) => {
+        if (typeof targetPath === 'string' && targetPath.includes('.primary.lock')) {
+          unlinkInjected++;
+          const err = new Error('EACCES on lock unlink');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return origUnlink(targetPath);
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_f9', payload);
+    });
+
+    assert.equal(lockCloseInjected, true);
+    assert.equal(unlinkInjected, 1);
     assert.equal(res.status, 'committed');
+    assert.equal(res.verified, true);
     assert.equal(verifyFilePayload(res.path, 'job_f9').status, 'valid');
   });
 
   await suite.test('F10: Status shifts to inaccessible between check and cleanup: non-fatal handling; valid source retained', async () => {
-    fs.mkdirSync(TEST_RECOVERY_DIR, { recursive: true });
+    let statCalls = 0;
+    let inaccessibleInjected = 0;
     const payload = { job_id: 'job_f10', data: 'f10_data' };
-    const res = persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_f10', payload);
-    assert.ok(res.verified);
-    assert.ok(fs.existsSync(res.path));
+
+    const res = await withInjectedFs({
+      statSync: (origStat, targetPath) => {
+        statCalls++;
+        if (typeof targetPath === 'string' && targetPath.includes('.tmp.') && statCalls >= 2) {
+          inaccessibleInjected++;
+          const err = new Error('EACCES: permission denied during stat');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return origStat(targetPath);
+      }
+    }, async () => {
+      return persistEmergencyRecoveryRecord(TEST_RECOVERY_DIR, 'job_f10', payload);
+    });
+
+    assert.ok(inaccessibleInjected > 0, 'Inaccessible stat failure must have been triggered');
+    assert.equal(res.verified, true);
+    assert.ok(fs.existsSync(res.path), 'Destination file must be published and preserved');
   });
 });
