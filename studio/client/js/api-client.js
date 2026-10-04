@@ -82,6 +82,12 @@ export class ApiClient {
   async getJob(jobId) {
     return this.request(`/api/jobs/${encodeURIComponent(jobId)}`);
   }
+
+  async scanAssets() {
+    return this.request('/api/scan', {
+      method: 'POST'
+    });
+  }
 }
 
 export const api = new ApiClient();

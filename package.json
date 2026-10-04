@@ -9,6 +9,7 @@
   },
   "scripts": {
     "doctor": "node studio/cli/studio.js doctor",
+    "scan": "node studio/cli/studio.js scan",
     "dev": "node studio/cli/studio.js dev",
     "test": "node --test \"tests/**/*.test.js\"",
     "test:unit": "node --test \"tests/unit/**/*.test.js\"",

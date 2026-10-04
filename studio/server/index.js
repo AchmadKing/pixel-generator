@@ -9,6 +9,8 @@ import { registerProjectRoutes } from './routes/api-projects.js';
 import { registerAssetRoutes } from './routes/api-assets.js';
 import { registerJobRoutes } from './routes/api-jobs.js';
 import { registerStreamRoutes } from './routes/api-stream.js';
+import { registerScanRoutes } from './routes/api-scan.js';
+import { scanAndSyncAssets } from './storage/asset-scanner.js';
 import { AssetDeletionOrchestrator } from './storage/asset-deletion-orchestrator.js';
 import { AssetCoordinator } from './queue/asset-coordinator.js';
 
@@ -43,6 +45,7 @@ export function createStudioApp({ db, jobQueue, storageManager, config, assetCoo
   registerAssetRoutes(router, db, deletionOrchestrator);
   registerJobRoutes(router, db, jobQueue, config);
   registerStreamRoutes(router, db, storageManager.config);
+  registerScanRoutes(router, db, storageManager.config);
 
   // Main HTTP Request Listener
   async function requestListener(req, res) {
@@ -144,6 +147,12 @@ export function startStudioServer({ db, jobQueue, storageManager, config, port =
     });
 
     server.listen(serverPort, serverHost, () => {
+      try {
+        scanAndSyncAssets(db, storageManager.config);
+      } catch (scanErr) {
+        console.warn(`[WARN] Initial asset scan error: ${scanErr.message}`);
+      }
+
       resolve({
         server,
         port: server.address().port,

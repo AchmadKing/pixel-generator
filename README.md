@@ -1,26 +1,35 @@
 # Pixel Game Asset Studio
 
-> **Local 2D Pixel Art Generator & Studio Workbench**  
-> Prompt $\to$ Non-Destructive Post-Processing $\to$ Live Canvas Viewport $\to$ Before/After Slider $\to$ Version History Rollback.
+> **Local 2D Pixel Art Game Asset Studio: External AI Agent Workflow & Local Inspector**  
+> AI Coding Agent $\to$ Assets Storage $\to$ Studio Live Viewport $\to$ Before/After Slider $\to$ Version History Rollback.
 
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.13.0-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(Pure%20Native)-blue.svg)](package.json)
-[![Tests](https://img.shields.io/badge/Tests-172%20Passed%20(100%25)-success.svg)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-185%20Passed%20(100%25)-success.svg)](tests/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
-**Pixel Game Asset Studio** adalah aplikasi berbasis web lokal (*Local-First*) untuk menghasilkan, mengedit, dan mengelola aset game 2D piksel art siap pakai untuk game engine modern (Godot, Unity, Defold, Phaser, RPG Maker).
+**Pixel Game Asset Studio** adalah studio lokal (*Local-First*) untuk menginspeksi, membandingkan, menguji, dan mengelola aset game 2D pixel art hasil pembuatan **AI coding agent** pengguna di IDE atau terminal/CLI (Godot, Unity, Defold, Phaser, RPG Maker).
 
-Aplikasi ini menggabungkan model generasi AI dengan **pipeline post-processing deterministik lokal murni (Pure JS)** untuk menghasilkan piksel art sejati: penghapusan latar belakang solid (*4-corner chroma cutout*), framing dan pemusatan otomatis, serta kuantisasi warna ke palet retro klasik (*Endesga 32, PICO-8, GameBoy, NES*).
+### 💡 Paradigma Utama: Pemisahan Tugas AI Agent vs Studio
+1. **AI Agent (di IDE / Terminal / CLI)**:
+   - Menerima instruksi pengguna dalam bahasa alami.
+   - Menggunakan model AI yang dipilih pengguna pada lingkungannya.
+   - Menggunakan referensi gambar jika disediakan.
+   - Menghasilkan gambar dan menyimpannya langsung ke direktori aset disk (`assets/generated/<slug>/v1/`) bersama `metadata.json`.
+2. **Pixel Game Asset Studio (di Browser Lokal)**:
+   - Berfungsi sebagai **Local Inspector & Viewer** (bukan formulir prompt AI).
+   - Membaca dan menyinkronkan file dari disk ke SQLite secara instan tanpa memerlukan API key eksternal.
+   - Menyediakan Canvas Viewport presisi integer 1x-32x, pixel grid, alpha checkerboard, perbandingan Before/After, inspeksi metadata teknis, dan version history.
 
 ---
 
 ## ⚡ Panduan Cepat (Quickstart)
 
-Untuk panduan instalasi kilat dalam 60 detik, silakan baca:  
+Untuk panduan kilat dalam 60 detik, silakan baca:  
 👉 **[QUICKSTART.md](QUICKSTART.md)**
 
-### Menjalankan dalam 2 Perintah:
+### Menjalankan Studio dalam 2 Perintah:
 ```powershell
 # 1. Jalankan diagnostik sistem (Doctor Check)
 npm run doctor
@@ -28,16 +37,30 @@ npm run doctor
 # 2. Jalankan Studio Web Server lokal
 npm run dev
 ```
-Buka browser Anda di: **`http://127.0.0.1:5178`**
+Buka browser di: **`http://127.0.0.1:5178`**
 
 ---
 
-## 🎯 Fitur Utama
+## 🤖 Integrasi AI Agent Skills
 
-### 1. Studio Web Workbench (Vanilla HTML5 / CSS3 / ES Modules)
-- **Zero External Dependencies**: Tidak memerlukan Vite, Webpack, React, atau build step. Langsung dimuat instan pada browser modern.
-- **Desain Dark Modern Retro**: Menggunakan font stack sistem lokal (100% offline ready), panel glassmorphism halus, dan aksen neon cyan.
-- **RAM 4 GB Friendly**: Dioptimalkan secara khusus untuk hemat penggunaan memori (peak heap $< 10$ MB) dan lancar pada CPU standar.
+Studio mengikuti pola integrasi agent berbasis skill (terinspirasi dari arsitektur CLI agent). Panduan lengkap agent tersedia pada file **[AGENTS.md](AGENTS.md)**.
+
+Skill yang tersedia di `.agents/skills/` dan `agents/skills/`:
+- **`pixel-art-generation`**: Instruksi agent untuk membuat aset piksel art baru berdasarkan prompt dan menyimpan ke `assets/generated/<slug>/v1/processed.png` beserta `metadata.json`.
+- **`pixel-art-revise`**: Instruksi agent untuk membuat variasi atau revisi non-destruktif ke `v2/`, `v3/`, tanpa menimpa versi sebelumnya.
+- **`asset-review`**: Verifikasi integritas header PNG 24-byte, dimensi, palet warna, dan kelengkapan metadata.
+- **`asset-history`**: Pelacakan riwayat versi dan silsilah revisi aset.
+- **`asset-validation-export`**: Validasi pra-ekspor dan pengemasan aset untuk engine game.
+- **`sprite-animation`**: Penataan frame animasi dan anchor point.
+- **`tileset-generation`**: Autotiling bitmask 16-tile dan 47-tile untuk tileset lingkungan.
+
+---
+
+## 🎯 Fitur Studio Web (Local Inspector)
+
+### 1. Asset Details & Technical Inspection Panel
+- Menampilkan spesifikasi teknis lengkap: resolusi piksel asli, palet warna Lospec, format bit-depth, ukuran file, path relatif di disk, prompt sumber, model/tool pembuat, dan seed jika tercatat.
+- Dilengkapi tombol salin path relatif yang aman untuk langsung dimasukkan ke skrip game engine.
 
 ### 2. Canvas Viewport Interaktif
 - **Skala Integer Presisi (1x s/d 32x)**: Rendering CSS `image-rendering: pixelated` menjaga ketajaman piksel murni tanpa blur anti-aliasing.
@@ -46,23 +69,21 @@ Buka browser Anda di: **`http://127.0.0.1:5178`**
 - **Papan Catur Transparansi**: Menampilkan kontras latar belakang transparan murni (*alpha channel*).
 
 ### 3. Before / After Comparison Slider
-- **Split-Screen Slider Interaktif**: Tarik pembatas di tengah gambar untuk membandingkan output mentah AI (`raw.png`) vs hasil post-processing piksel art (`processed.png`).
-- **Skala & Koordinat Tersinkronisasi**: Menjamin tidak ada pergeseran piksel saat membandingkan sebelum dan sesudah.
-- **Mode Tampilan Lengkap**: Mendukung mode *Split View*, *Final Output*, *Raw Input*, dan *Side-by-Side*.
+- **Split-Screen Slider Interaktif**: Membandingkan gambar input/referensi dengan hasil piksel art jika kedua file tersedia.
+- **Kejujuran Data**: Jika hanya satu gambar yang tersedia pada versi tersebut, slider disembunyikan secara otomatis untuk menjaga integritas data tanpa memalsukan gambar pembanding.
 
 ### 4. Non-Destructive Version History & Rollback
-- **Immutable Snapshots**: Setiap generasi versi baru disimpan secara permanen di disk dan SQLite tanpa menimpa versi sebelumnya.
-- **One-Click Rollback**: Tombol *Set Active* memungkinkan pengembang mengembalikan versi aktif aset kapan saja tanpa kehilangan riwayat snapshot lainnya.
-- **Fork / Revise**: Menyalin prompt, seed, palet, dan dimensi versi lama ke formulir untuk iterasi variasi baru.
+- **Immutable Snapshots**: Setiap revisi disimpan dalam subfolder terpisah (`v1`, `v2`, dst.) dan terindeks di SQLite.
+- **One-Click Rollback**: Tombol *Set Active* memungkinkan pengembang mengembalikan versi aktif aset kapan saja.
+- **Fork / Revise**: Menyalin prompt versi lama ke clipboard untuk diiterasikan kembali dengan AI agent di IDE.
 
-### 5. Multi-Provider Generation Engine
-- **Mock Provider (100% Offline Ready)**: Generator prosedural deterministik berbasis PRNG SplitMix32. Gratis, tidak butuh koneksi internet atau API key.
-- **Fal.ai Cloud Queue Provider (Flux LoRA)**: Terintegrasi dengan cloud queue Fal.ai untuk generasi berkualitas tinggi. Dilengkapi perlindungan tagihan ganda (*anti-duplicate billing*) dan validasi keamanan SSRF.
+### 5. Filesystem Scanner & Zero Duplication
+- **Scanner Otomatis & Manual**: Tombol *Rescan Assets* di browser atau perintah CLI `npm run scan` mendeteksi aset baru di folder disk tanpa membuat duplikasi di database.
+- **Fast 24-Byte Header Parser**: Membaca dimensi gambar langsung dari chunk IHDR PNG tanpa memuat seluruh file ke RAM, memastikan kepatuhan terhadap batasan RAM 4 GB.
 
-### 6. Failure-Safe Storage & Asset Deletion
-- **SQLite ACID Metadata**: Penyimpanan metadata terstruktur menggunakan modul native `node:sqlite` dengan WAL mode dan integrity triggers.
-- **Crash Recovery Journal**: Tabel persisten `asset_deletion_journal` memastikan penghapusan aset yang terinterupsi atau mengalami file lock di Windows dapat dipulihkan secara otomatis saat startup.
-- **In-Flight Concurrency Guard**: Mencegah race condition antara job yang sedang berjalan dan penghapusan aset (`ERR_ASSET_BUSY`).
+### 6. Safe Deletion & Crash Recovery Journal
+- Penghapusan aset dilengkapi database cascading dan penghapusan folder fisik yang aman (*strict path jail*).
+- Crash recovery journal melindungi dari kegagalan file lock di Windows.
 
 ---
 
@@ -71,11 +92,12 @@ Buka browser Anda di: **`http://127.0.0.1:5178`**
 | Perintah | Deskripsi |
 | :--- | :--- |
 | `npm run dev` | Menjalankan server lokal Studio Web (`http://127.0.0.1:5178`) |
+| `npm run scan` | Memindai `assets/generated/` dan menyinkronkan aset AI agent ke SQLite |
 | `npm run doctor` | Memeriksa ketersediaan runtime Node.js, SQLite, folder storage, dan path jail |
-| `npm test` | Menjalankan seluruh test suite otomatis (172 unit & integration tests) |
-| `npm run test:unit` | Menjalankan pengujian unit (schema, quantizer, decoder, router, orchestrator) |
-| `npm run test:integration` | Menjalankan pengujian integrasi (HTTP server, provider queue, storage recovery) |
-| `npm run test:manual:fal` | Menjalankan harness uji manual cloud Fal.ai (memerlukan `FAL_KEY`) |
+| `npm test` | Menjalankan seluruh test suite otomatis (185 unit & integration tests) |
+| `npm run test:unit` | Menjalankan pengujian unit (schema, scanner, quantizer, decoder, router) |
+| `npm run test:integration` | Menjalankan pengujian integrasi (HTTP server, API scan, storage recovery) |
+| `npm run test:manual:fal` | Menjalankan harness uji manual cloud Fal.ai jika `FAL_KEY` dikonfigurasi |
 | `node scripts/benchmark-post-processing.js` | Mengukur latensi pipeline CPU dan konsumsi memori heap/RSS |
 
 ---
@@ -84,47 +106,35 @@ Buka browser Anda di: **`http://127.0.0.1:5178`**
 
 ```text
 pixel-generator/
+├── .agents/skills/                  # Agent Skills (pixel-art-generation, revise, review, export)
+├── agents/skills/                   # Mirror kompatibilitas Agent Skills
+├── AGENTS.md                        # Panduan lengkap alur kerja AI Agent
+├── QUICKSTART.md                    # Panduan instalasi dan penggunaan kilat
+├── assets/
+│   ├── generated/                   # Direktori penyimpanan hasil AI agent (<slug>/v1/)
+│   ├── references/                  # Direktori gambar referensi pengguna
+│   └── exports/                     # Direktori paket ekspor game engine
 ├── studio/
-│   ├── client/                      # Web Studio Frontend (Vanilla HTML/CSS/JS)
-│   │   ├── index.html               # Halaman tunggal Studio Web SPA
+│   ├── cli/                         # CLI Studio (cmd-doctor, cmd-dev, cmd-scan)
+│   ├── client/                      # Web Studio Frontend (HTML5, Vanilla CSS3, ES Modules)
+│   │   ├── index.html               # Single-page local inspector & canvas viewport
 │   │   ├── css/                     # Styling (main.css, studio.css, library.css)
-│   │   └── js/                      # Modul frontend (viewport, slider, timeline, form)
-│   ├── server/                      # Backend Server (Node.js Native ESM)
-│   │   ├── index.js                 # Native HTTP Server, static router, streamer
-│   │   ├── config.js                # Loader konfigurasi & runtime version guard
-│   │   ├── db/                      # SQLite database, schema DDL, safe-deletion
-│   │   ├── queue/                   # Job queue, store, asset coordinator
-│   │   ├── storage/                 # Storage manager, path jail, deletion orchestrator
-│   │   ├── providers/               # Abstraksi provider (Mock & Fal.ai)
-│   │   ├── post-processing/         # Pure-JS PNG decoder, cutout, framer, quantizer
-│   │   └── routes/                  # Route handlers (config, projects, assets, jobs, stream)
-│   └── cli/                         # Perintah CLI (studio.js, cmd-dev.js, cmd-doctor.js)
-├── assets/                          # Folder penyimpanan data lokal
-│   ├── studio.db                    # Basis data SQLite utama (WAL mode)
-│   ├── generated/                   # Direktori output gambar (raw.png & processed.png)
-│   ├── projects/                    # Metadata project game
-│   └── exports/                     # Paket ekspor
-├── tests/                           # Rangkaian pengujian otomatis (172 tests)
-│   ├── unit/                        # Pengujian unit modul
-│   └── integration/                 # Pengujian integrasi end-to-end
-├── scripts/                         # Script benchmark dan harness pengujian
-├── rules/                           # Standar estetika dan aturan piksel art
-├── QUICKSTART.md                    # Panduan instalasi dan penggunaan cepat
-├── package.json                     # Metadata proyek & script npm
-└── README.md                        # Dokumentasi utama proyek
+│   │   └── js/                      # Modul frontend (viewport, slider, timeline, details)
+│   └── server/                      # Backend Server (Node.js Native ESM)
+│       ├── index.js                 # Native HTTP Server, static router, streamer
+│       ├── config.js                # Loader konfigurasi
+│       ├── db/                      # SQLite database, schema DDL, safe-deletion
+│       ├── queue/                   # Job queue, store, asset coordinator
+│       ├── storage/                 # Storage manager, path jail, asset scanner
+│       ├── providers/               # Abstraksi provider (Mock & Fal.ai)
+│       ├── post-processing/         # Pure-JS PNG decoder, cutout, framer, quantizer
+│       └── routes/                  # API routes (config, projects, assets, scan, stream)
+└── tests/
+    ├── unit/                        # 13 test suite unit (174 tests)
+    └── integration/                 # 6 test suite integrasi (11 tests)
 ```
 
 ---
 
-## 🔒 Keamanan & Perlindungan Sistem
-
-1. **Strict Localhost Loopback**: Server terikat ke `127.0.0.1` secara default untuk mencegah akses tidak sah dari jaringan lokal.
-2. **DNS Rebinding & CSRF Protection**: Header `Host` dan `Origin` divalidasi ketat pada request mutatif (`POST`, `PUT`, `DELETE`).
-3. **Multi-Layer Path Jail**: Mencegah serangan path traversal (`../`, `%2e%2e`, null bytes) melalui validasi alfanumerik regex dan pemeriksaan canonical containment via `fs.realpathSync.native`.
-4. **Zero Path Leaks**: Respons API tidak mengekspos lokasi file fisik internal komputer, melainkan menyajikan URL streaming biner terisolasi.
-
----
-
 ## 📄 Lisensi
-
-Proyek ini dirilis di bawah lisensi [MIT](LICENSE).
+Didistribusikan di bawah lisensi MIT. Lihat file `LICENSE` untuk informasi lebih lanjut.

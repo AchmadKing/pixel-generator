@@ -44,7 +44,7 @@ Guide the AI agent in generating a new 2D pixel art game asset based on user pro
      "target_height": 32,
      "has_reference": false,
      "source_tool": "ai-agent",
-     "created_at": 1727920000000
+     "created_at": <unix-timestamp>
    }
    ```
 

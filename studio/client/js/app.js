@@ -2,7 +2,7 @@ import { api } from './api-client.js';
 import { CanvasViewport } from './canvas-viewport.js';
 import { CompareSlider } from './compare-slider.js';
 import { VersionTimeline } from './version-timeline.js';
-import { GenerationForm } from './generation-form.js';
+import { AssetDetailsPanel } from './asset-details.js';
 import { AssetLibrary } from './asset-library.js';
 
 class StudioApp {
@@ -48,39 +48,22 @@ class StudioApp {
         }
       },
       onForkVersion: (asset, version) => {
-        this.form.setFormValues({
-          prompt: version.prompt,
-          negativePrompt: version.negative_prompt,
-          category: asset.category,
-          resolution: version.target_width,
-          palette: version.palette_id,
-          seed: version.seed,
-          assetId: asset.id
-        });
-        this.switchTab('tabGenerate');
+        const agentPrompt = `Please revise asset "${asset.name}" (${asset.category}): ${version.prompt}`;
+        try {
+          navigator.clipboard.writeText(agentPrompt);
+          alert(`Revision prompt copied to clipboard!\n\nPaste this in your IDE / Terminal AI agent to create the revised version:\n\n"${agentPrompt}"`);
+        } catch (_) {
+          prompt('Copy this revision prompt for your AI agent:', agentPrompt);
+        }
+        this.switchTab('tabDetails');
       }
     });
 
-    // 4. Initialize Generation Form
-    this.form = new GenerationForm({
-      formEl: document.getElementById('generationForm'),
-      promptInput: document.getElementById('promptInput'),
-      negativePromptInput: document.getElementById('negativePromptInput'),
-      categorySelect: document.getElementById('categorySelect'),
-      resolutionSelect: document.getElementById('resolutionSelect'),
-      paletteSelect: document.getElementById('paletteSelect'),
-      paletteSwatchesEl: document.getElementById('palettePreviewSwatches'),
-      seedInput: document.getElementById('seedInput'),
-      btnRandomSeed: document.getElementById('btnRandomSeed'),
-      skipPostProcessingCheck: document.getElementById('skipPostProcessingCheck'),
-      progressHudEl: document.getElementById('jobProgressHud'),
-      progressTitleEl: document.getElementById('jobStageTitle'),
-      progressSubtitleEl: document.getElementById('jobStageSubtitle'),
-      progressFillEl: document.getElementById('jobProgressFill'),
-      apiClient: api,
-      onJobCompleted: async (assetId, versionId) => {
-        await this.refreshLibrary();
-        await this.loadAsset(assetId, versionId);
+    // 4. Initialize Asset Details Panel
+    this.detailsPanel = new AssetDetailsPanel({
+      containerEl: document.getElementById('tabDetails'),
+      onRescan: async () => {
+        await this.handleRescan();
       }
     });
 
@@ -103,6 +86,7 @@ class StudioApp {
           this.currentAsset = null;
           this.currentVersion = null;
           this.timeline.setAsset(null);
+          this.detailsPanel.setAsset(null);
         }
         await this.refreshLibrary();
       }
@@ -125,31 +109,30 @@ class StudioApp {
 
   initToolbarControls() {
     // Library Panel Toggle
-    document.getElementById('btnToggleLibrary').addEventListener('click', () => {
-      this.library.toggleCollapse();
-    });
-
-    // New Asset Button
-    document.getElementById('btnNewAsset').addEventListener('click', () => {
-      this.form.setFormValues({
-        prompt: '',
-        negativePrompt: '',
-        category: 'items',
-        resolution: 32,
-        palette: 'endesga-32',
-        seed: null,
-        assetId: null
+    const btnToggleLib = document.getElementById('btnToggleLibrary');
+    if (btnToggleLib) {
+      btnToggleLib.addEventListener('click', () => {
+        this.library.toggleCollapse();
       });
-      this.switchTab('tabGenerate');
-      document.getElementById('promptInput').focus();
-    });
+    }
+
+    // Rescan Assets Button
+    const btnRescan = document.getElementById('btnRescanAssets');
+    if (btnRescan) {
+      btnRescan.addEventListener('click', () => {
+        this.handleRescan();
+      });
+    }
 
     // Delete Current Asset Button
-    document.getElementById('btnDeleteAsset').addEventListener('click', () => {
-      if (this.currentAsset) {
-        this.library.requestDelete(this.currentAsset.id, this.currentAsset.name);
-      }
-    });
+    const btnDelete = document.getElementById('btnDeleteAsset');
+    if (btnDelete) {
+      btnDelete.addEventListener('click', () => {
+        if (this.currentAsset) {
+          this.library.requestDelete(this.currentAsset.id, this.currentAsset.name);
+        }
+      });
+    }
 
     // View Mode Buttons
     const modeButtons = [
@@ -161,31 +144,70 @@ class StudioApp {
 
     modeButtons.forEach(({ id, mode }) => {
       const btn = document.getElementById(id);
-      btn.addEventListener('click', () => {
-        modeButtons.forEach(b => document.getElementById(b.id).classList.remove('active'));
-        btn.classList.add('active');
-        this.slider.setMode(mode);
-      });
+      if (btn) {
+        btn.addEventListener('click', () => {
+          if (!this.slider.hasComparison && mode !== 'processed') {
+            return;
+          }
+          modeButtons.forEach(b => {
+            const el = document.getElementById(b.id);
+            if (el) el.classList.remove('active');
+          });
+          btn.classList.add('active');
+          this.slider.setMode(mode);
+        });
+      }
     });
 
     // Zoom Controls
-    document.getElementById('btnZoomIn').addEventListener('click', () => this.viewport.zoomIn());
-    document.getElementById('btnZoomOut').addEventListener('click', () => this.viewport.zoomOut());
-    document.getElementById('btnZoom100').addEventListener('click', () => this.viewport.setZoom100());
-    document.getElementById('btnZoomFit').addEventListener('click', () => this.viewport.fitToScreen());
+    document.getElementById('btnZoomIn')?.addEventListener('click', () => this.viewport.zoomIn());
+    document.getElementById('btnZoomOut')?.addEventListener('click', () => this.viewport.zoomOut());
+    document.getElementById('btnZoom100')?.addEventListener('click', () => this.viewport.setZoom100());
+    document.getElementById('btnZoomFit')?.addEventListener('click', () => this.viewport.fitToScreen());
 
     const btnGrid = document.getElementById('btnToggleGrid');
-    btnGrid.addEventListener('click', () => {
-      const active = this.viewport.toggleGrid();
-      btnGrid.classList.toggle('active', active);
-    });
+    if (btnGrid) {
+      btnGrid.addEventListener('click', () => {
+        const active = this.viewport.toggleGrid();
+        btnGrid.classList.toggle('active', active);
+      });
+    }
 
-    // Right Workbench Tabs
+    // Right Panel Tabs
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         this.switchTab(btn.dataset.tab);
       });
     });
+  }
+
+  async handleRescan() {
+    const btnRescan = document.getElementById('btnRescanAssets');
+    const origHtml = btnRescan ? btnRescan.innerHTML : '';
+    if (btnRescan) {
+      btnRescan.disabled = true;
+      btnRescan.innerHTML = `Scanning...`;
+    }
+
+    try {
+      const scanRes = await api.scanAssets();
+      await this.refreshLibrary();
+
+      if (this.currentAsset) {
+        await this.loadAsset(this.currentAsset.id);
+      } else if (this.library.assets.length > 0) {
+        const firstId = this.library.assets[0].id;
+        this.library.selectAsset(firstId);
+        await this.loadAsset(firstId);
+      }
+    } catch (err) {
+      alert(`Asset scan failed: ${err.message}`);
+    } finally {
+      if (btnRescan) {
+        btnRescan.disabled = false;
+        btnRescan.innerHTML = origHtml;
+      }
+    }
   }
 
   switchTab(tabId) {
@@ -201,17 +223,11 @@ class StudioApp {
   async loadConfig() {
     try {
       const configData = await api.getConfig();
-      const badge = document.getElementById('providerBadge');
-      if (configData.provider?.falAvailable) {
-        badge.textContent = 'Fal.ai Cloud';
-        badge.style.borderColor = 'rgba(168, 85, 247, 0.4)';
-        badge.style.color = '#a855f7';
-        badge.style.backgroundColor = 'rgba(168, 85, 247, 0.1)';
-      } else {
-        badge.textContent = 'Mock [Offline]';
+      const badge = document.getElementById('workflowBadge');
+      if (badge) {
+        badge.textContent = 'AI Agent Mode';
+        badge.title = 'External AI Coding Agent generates assets; Studio inspects and manages them.';
       }
-
-      this.form.setPalettes(configData.palettes);
     } catch (e) {
       console.warn('Failed to load studio configuration:', e.message);
     }
@@ -235,13 +251,33 @@ class StudioApp {
       const targetVersionId = specificVersionId || asset.current_version_id;
       const targetVersion = asset.versions?.find(v => v.id === targetVersionId) || asset.versions?.[0];
 
+      this.detailsPanel.setAsset(asset, targetVersion);
+
       if (targetVersion) {
         this.currentVersion = targetVersion;
         const width = targetVersion.target_width || 32;
         const height = targetVersion.target_height || 32;
 
         this.viewport.setDimensions(width, height);
-        await this.slider.loadImages(targetVersion.raw_url, targetVersion.processed_url, width, height);
+        const hasComparison = await this.slider.loadImages(targetVersion.raw_url, targetVersion.processed_url, width, height);
+
+        // Update mode button states based on whether comparison image exists
+        const btnSplit = document.getElementById('btnModeSplit');
+        const btnRaw = document.getElementById('btnModeRaw');
+        const btnSide = document.getElementById('btnModeSideBySide');
+        const btnProc = document.getElementById('btnModeProcessed');
+
+        if (!hasComparison) {
+          if (btnSplit) { btnSplit.classList.remove('active'); btnSplit.style.opacity = '0.4'; btnSplit.title = 'Single image: No Before/After pair recorded'; }
+          if (btnRaw) { btnRaw.classList.remove('active'); btnRaw.style.opacity = '0.4'; }
+          if (btnSide) { btnSide.classList.remove('active'); btnSide.style.opacity = '0.4'; }
+          if (btnProc) { btnProc.classList.add('active'); }
+        } else {
+          if (btnSplit) { btnSplit.classList.add('active'); btnSplit.style.opacity = '1'; btnSplit.title = 'Before/After Split Comparison'; }
+          if (btnRaw) { btnRaw.style.opacity = '1'; }
+          if (btnSide) { btnSide.style.opacity = '1'; }
+          if (btnProc) { btnProc.classList.remove('active'); }
+        }
 
         // Update HUD
         const hudVersion = document.getElementById('hudVersion');
